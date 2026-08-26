@@ -1,0 +1,342 @@
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local VirtualUser = game:GetService("VirtualUser")
+local running = false
+
+LocalPlayer.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+end)
+
+local DELAY_MIN = 0.3
+local DELAY_MAX = 0.7
+local IMPERFECT_CHANCE = 0.21
+
+local function clickUI(btn)
+    if not btn then return end
+    pcall(function()
+        for _, c in ipairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
+        for _, c in ipairs(getconnections(btn.Activated)) do c:Fire() end
+    end)
+end
+
+local function copyBoard(board, n)
+    local b = {}
+    for r = 0, n-1 do
+        b[r] = {}
+        for c = 0, n-1 do b[r][c] = board[r][c] end
+    end
+    return b
+end
+
+local function canPlace(board, cells, r, c, n)
+    for _, cell in ipairs(cells) do
+        local pr, pc = r + cell[1], c + cell[2]
+        if pr < 0 or pr >= n or pc < 0 or pc >= n or board[pr][pc] ~= 0 then return false end
+    end
+    return true
+end
+
+local function doPlace(board, cells, r, c)
+    for _, cell in ipairs(cells) do board[r + cell[1]][c + cell[2]] = 1 end
+end
+
+local function applyClears(board, n)
+    local cleared = 0
+    local rows, cols = {}, {}
+    for r = 0, n-1 do
+        local full = true
+        for c = 0, n-1 do if board[r][c] == 0 then full = false break end end
+        if full then rows[r] = true; cleared += 1 end
+    end
+    for c = 0, n-1 do
+        local full = true
+        for r = 0, n-1 do if board[r][c] == 0 then full = false break end end
+        if full then cols[c] = true; cleared += 1 end
+    end
+    for r in pairs(rows) do for c = 0, n-1 do board[r][c] = 0 end end
+    for c in pairs(cols) do for r = 0, n-1 do board[r][c] = 0 end end
+    return cleared
+end
+
+local function lineProgress(board, n)
+    local score = 0
+    for r = 0, n-1 do
+        local f = 0
+        for c = 0, n-1 do if board[r][c] ~= 0 then f += 1 end end
+        score += f * f
+    end
+    for c = 0, n-1 do
+        local f = 0
+        for r = 0, n-1 do if board[r][c] ~= 0 then f += 1 end end
+        score += f * f
+    end
+    return score
+end
+
+local function countHoles(board, n)
+    local holes = 0
+    for r = 0, n-1 do
+        for c = 0, n-1 do
+            if board[r][c] == 0 then
+                local w = 0
+                if r == 0 or board[r-1][c] ~= 0 then w += 1 end
+                if r == n-1 or board[r+1][c] ~= 0 then w += 1 end
+                if c == 0 or board[r][c-1] ~= 0 then w += 1 end
+                if c == n-1 or board[r][c+1] ~= 0 then w += 1 end
+                if w >= 3 then holes += 1 end
+            end
+        end
+    end
+    return holes
+end
+
+local function evalBoard(board, n)
+    return (applyClears(board, n) * 1500) + (lineProgress(board, n) * 3) - (countHoles(board, n) * 40)
+end
+
+local function bestSinglePos(board, cells, n)
+    local bestScore, bestR, bestC = -math.huge, nil, nil
+    local cands = {}
+    for r = 0, n-1 do
+        for c = 0, n-1 do
+            if canPlace(board, cells, r, c, n) then
+                local b = copyBoard(board, n)
+                doPlace(b, cells, r, c)
+                local s = evalBoard(b, n)
+                table.insert(cands, {r=r, c=c, score=s})
+                if s > bestScore then bestScore, bestR, bestC = s, r, c end
+            end
+        end
+    end
+    return bestR, bestC, bestScore, cands
+end
+
+local function findBestMove(board, hand, sim, n)
+    local bestScore, bestSlot, bestR, bestC = -math.huge, nil, nil, nil
+    for slotIdx = 1, 3 do
+        local pId = hand[slotIdx]
+        if not pId then continue end
+        local piece = sim.PIECES[pId]
+        if not piece then continue end
+
+        local _, _, _, cands = bestSinglePos(board, piece.cells, n)
+        table.sort(cands, function(a,b) return a.score > b.score end)
+        
+        for i = 1, math.min(5, #cands) do
+            local pos = cands[i]
+            local b1 = copyBoard(board, n)
+            doPlace(b1, piece.cells, pos.r, pos.c)
+            local baseScore = pos.score + (applyClears(b1, n) * 1500)
+
+            local otherBonus = 0
+            for os = 1, 3 do
+                if os ~= slotIdx and hand[os] and sim.PIECES[hand[os]] then
+                    local or_, _, os_score = bestSinglePos(b1, sim.PIECES[hand[os]].cells, n)
+                    otherBonus += (or_ and os_score * 0.3) or -800
+                end
+            end
+
+            if baseScore + otherBonus > bestScore then
+                bestScore, bestSlot, bestR, bestC = baseScore + otherBonus, slotIdx, pos.r, pos.c
+            end
+        end
+    end
+    return bestSlot, bestR, bestC
+end
+
+local function firePrompt()
+    pcall(function()
+        local character = LocalPlayer.Character
+        if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+        local rootPos = character.HumanoidRootPart.Position
+        
+        local closestPrompt = nil
+        local minDistance = 20
+
+        for _, desc in pairs(workspace:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Parent and desc.Parent.Name == "Collide" then
+                local machine = desc.Parent.Parent
+                if machine and machine.Name == "Arcade_BlockBurst" then
+                    local dist = (rootPos - desc.Parent.Position).Magnitude
+                    if dist < minDistance then
+                        closestPrompt = desc
+                        minDistance = dist
+                    end
+                end
+            end
+        end
+
+        if closestPrompt then
+            fireproximityprompt(closestPrompt)
+        end
+    end)
+end
+
+local ui131 = nil
+local idleTimer = tick()
+local lastGcScan = 0
+
+local function autoPlay()
+    while true do
+        task.wait(0.3)
+        
+        if not running then 
+            ui131 = nil
+            idleTimer = tick()
+            lastGcScan = 0
+            continue 
+        end
+        
+        local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+        local arc = pGui and pGui:FindFirstChild("ArcadeScreenGui")
+        
+        -- SCAN MEMORI: Hanya ambil tabel yang MURNI AKTIF (state.alive == true)
+        if (not ui131 or not ui131.state or not ui131.state.alive) and (tick() - lastGcScan > 1.0) then
+            lastGcScan = tick()
+            ui131 = nil
+            for _, v in ipairs(getgc(true)) do
+                if type(v) == "table" and rawget(v, "tryPlace") and rawget(v, "repaintGhost") then
+                    if rawget(v, "state") and type(v.state) == "table" and v.state.alive then
+                        ui131 = v
+                        break
+                    end
+                end
+            end
+        end
+
+        local isPlaying = false
+        if ui131 and ui131.state and ui131.state.alive then
+            isPlaying = true
+        end
+
+        if isPlaying then
+            idleTimer = tick()
+            local state = ui131.state
+            local n = ui131.n
+            local slotIdx, r, c = findBestMove(copyBoard(state.board, n), state.hand, ui131.Sim, n)
+
+            if slotIdx and r then
+                if math.random() < IMPERFECT_CHANCE then
+                    local piece = ui131.Sim.PIECES[state.hand[slotIdx]]
+                    if piece then
+                        for tr = 0, n-1 do
+                            local broke = false
+                            for tc = 0, n-1 do
+                                if canPlace(state.board, piece.cells, tr, tc, n) and (tr ~= r or tc ~= c) then
+                                    r, c, broke = tr, tc, true
+                                    break
+                                end
+                            end
+                            if broke then break end
+                        end
+                    end
+                end
+                ui131.selected = slotIdx
+                ui131.tryPlace(slotIdx, c, r)
+                task.wait(DELAY_MIN + math.random() * (DELAY_MAX - DELAY_MIN))
+            else
+                task.wait(0.5)
+            end
+
+        else
+            ui131 = nil 
+            
+            if arc and arc.Enabled then
+                if tick() - idleTimer > 15 then
+                    local emergencyBtn = arc:FindFirstChild("Close", true) or arc:FindFirstChild("Back", true)
+                    if emergencyBtn then
+                        clickUI(emergencyBtn)
+                        task.wait(0.1)
+                        clickUI(emergencyBtn)
+                    end
+                    idleTimer = tick()
+                    task.wait(1.5)
+                    continue
+                end
+
+                local play = arc:FindFirstChild("ArcadeFrame") and arc.ArcadeFrame:FindFirstChild("Play")
+                if play then
+                    local gCont = play:FindFirstChild("GameContinue")
+                    local gRes = play:FindFirstChild("GameResult")
+                    local start = play:FindFirstChild("Start")
+                    
+                    if gCont and gCont.Visible then
+                        local closeBtn = gCont:FindFirstChild("Close") or gCont:FindFirstChild("Back")
+                        if closeBtn then
+                            clickUI(closeBtn)
+                            task.wait(0.1)
+                            clickUI(closeBtn)
+                        end
+                        task.wait(1.0)
+                        
+                    elseif gRes and gRes.Visible then
+                        local closeBtn = gRes:FindFirstChild("Close") or gRes:FindFirstChild("Back")
+                        if closeBtn then
+                            clickUI(closeBtn)
+                            task.wait(0.1)
+                            clickUI(closeBtn)
+                        end
+                        task.wait(1.0)
+                        
+                    elseif start and start.Visible then
+                        local gStart = start:FindFirstChild("GameStart")
+                        local coinBtn = gStart and gStart:FindFirstChild("coinPlay")
+                        
+                        if coinBtn and coinBtn.Visible then
+                            clickUI(coinBtn)
+                            task.wait(0.1)
+                            clickUI(coinBtn)
+                            task.wait(1.8) 
+                        else
+                            task.wait(0.5)
+                        end
+                    else
+                        task.wait(0.3)
+                    end
+                else
+                    task.wait(0.3)
+                end
+            else
+                firePrompt()
+                task.wait(1.5)
+            end
+        end
+    end
+end
+
+task.spawn(autoPlay)
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+   Name = "Untitled",
+   LoadingTitle = "Untitled",
+   LoadingSubtitle = "By DeeArz & YonoHub",
+   ConfigurationSaving = { Enabled = false },
+   KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Main Bot", 4483362458)
+
+MainTab:CreateToggle({
+   Name = "Auto Play Machine",
+   CurrentValue = false,
+   Flag = "AutoPlayToggle",
+   Callback = function(Value)
+      running = Value
+   end,
+})
+
+MainTab:CreateSlider({
+   Name = "Imperfect Chance",
+   Range = {0, 100},
+   Increment = 1,
+   Suffix = "%",
+   CurrentValue = 21,
+   Flag = "ImperfectSlider",
+   Callback = function(Value)
+      IMPERFECT_CHANCE = tonumber(Value) / 100
+   end,
+})
