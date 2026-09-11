@@ -1,0 +1,312 @@
+-- Pastikan dijalankan di Executor yang mendukung fungsi Client (LocalScript)
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+-- Daftar Koordinat Vector3
+local waypoints = {
+    Vector3.new(-130.99, 100.99, -1372.50),
+    Vector3.new(505.00, 115.62, -1835.00),
+    Vector3.new(1147.58, 19.32, -1802.75),
+    Vector3.new(2168.38, 18.23, -2177.92),
+    Vector3.new(2204.93, 353.18, -2466.55),
+    Vector3.new(1967.41, 386.54, -3490.34),
+    Vector3.new(1139.40, 458.38, -3775.81),
+    Vector3.new(423.74, 410.44, -3569.16),
+    Vector3.new(-178.38, 430.30, -3776.25),
+    Vector3.new(-879.96, 436.19, -4191.94),
+    Vector3.new(-1483.62, 680.24, -3858.36),
+    Vector3.new(-1678.90, 1111.71, -3867.33),
+    Vector3.new(-2470.61, 931.66, -4494.25),
+    Vector3.new(-3078.74, 932.32, -5129.45),
+    Vector3.new(-3857.90, 964.96, -5654.64),
+    Vector3.new(-4118.67, 999.65, -4841.02),
+    Vector3.new(-4234.82, 1241.23, -3872.11),
+    Vector3.new(-3761.86, 1375.71, -3351.00),
+    Vector3.new(-3749.11, 1676.43, -3104.00),
+    Vector3.new(-3714.44, 1723.24, -2444.25),
+    Vector3.new(-3415.44, 1822.87, -1917.75)
+}
+
+-- Buat ScreenGUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoTPGui"
+ScreenGui.Parent = player:WaitForChild("PlayerGui")
+ScreenGui.ResetOnSpawn = false
+
+-- Frame Utama (Diperbesar untuk menampung elemen baru)
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 260, 0, 260)
+MainFrame.Position = UDim2.new(0.5, -130, 0.1, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+-- Judul GUI
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Text = "Auto TP GUI + CP & Next/Prev"
+Title.TextSize = 13
+Title.Font = Enum.Font.SourceSansBold
+Title.Parent = MainFrame
+
+-- Tombol Close (X)
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -30, 0, 0)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Text = "X"
+CloseBtn.TextSize = 14
+CloseBtn.Parent = MainFrame
+
+-- Tombol Minimize (-)
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 30, 0, 30)
+MinBtn.Position = UDim2.new(1, -60, 0, 0)
+MinBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.Text = "-"
+MinBtn.TextSize = 14
+MinBtn.Parent = MainFrame
+
+-- Label Delay Text Box
+local DelayLabel = Instance.new("TextLabel")
+DelayLabel.Size = UDim2.new(0, 90, 0, 30)
+DelayLabel.Position = UDim2.new(0, 10, 0, 40)
+DelayLabel.BackgroundTransparency = 1
+DelayLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+DelayLabel.Text = "Delay (s):"
+DelayLabel.TextSize = 13
+DelayLabel.Font = Enum.Font.SourceSans
+DelayLabel.TextXAlignment = Enum.TextXAlignment.Left
+DelayLabel.Parent = MainFrame
+
+-- Input Text Box untuk Delay
+local DelayInput = Instance.new("TextBox")
+DelayInput.Size = UDim2.new(0, 130, 0, 30)
+DelayInput.Position = UDim2.new(0, 110, 0, 40)
+DelayInput.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+DelayInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+DelayInput.Text = "10"
+DelayInput.TextSize = 14
+DelayInput.Font = Enum.Font.SourceSansBold
+DelayInput.ClearTextOnFocus = false
+DelayInput.Parent = MainFrame
+
+-- Label CP (Checkpoint) Text Box
+local CpLabel = Instance.new("TextLabel")
+CpLabel.Size = UDim2.new(0, 90, 0, 30)
+CpLabel.Position = UDim2.new(0, 10, 0, 75)
+CpLabel.BackgroundTransparency = 1
+CpLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+CpLabel.Text = "CP (1-" .. #waypoints .. "):"
+CpLabel.TextSize = 13
+CpLabel.Font = Enum.Font.SourceSans
+CpLabel.TextXAlignment = Enum.TextXAlignment.Left
+CpLabel.Parent = MainFrame
+
+-- Input Text Box untuk CP (Checkpoint Target)
+local CpInput = Instance.new("TextBox")
+CpInput.Size = UDim2.new(0, 130, 0, 30)
+CpInput.Position = UDim2.new(0, 110, 0, 75)
+CpInput.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+CpInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+CpInput.Text = "1"
+CpInput.TextSize = 14
+CpInput.Font = Enum.Font.SourceSansBold
+CpInput.ClearTextOnFocus = false
+CpInput.Parent = MainFrame
+
+-- Tombol Prev (<)
+local PrevBtn = Instance.new("TextButton")
+PrevBtn.Size = UDim2.new(0, 110, 0, 30)
+PrevBtn.Position = UDim2.new(0, 10, 0, 115)
+PrevBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+PrevBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+PrevBtn.Text = "< PREV"
+PrevBtn.TextSize = 13
+PrevBtn.Font = Enum.Font.SourceSansBold
+PrevBtn.Parent = MainFrame
+
+-- Tombol Next (>)
+local NextBtn = Instance.new("TextButton")
+NextBtn.Size = UDim2.new(0, 110, 0, 30)
+NextBtn.Position = UDim2.new(0, 130, 0, 115)
+NextBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+NextBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+NextBtn.Text = "NEXT >"
+NextBtn.TextSize = 13
+NextBtn.Font = Enum.Font.SourceSansBold
+NextBtn.Parent = MainFrame
+
+-- Status Label
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -20, 0, 25)
+StatusLabel.Position = UDim2.new(0, 10, 0, 155)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+StatusLabel.Text = "Status: Idle"
+StatusLabel.TextSize = 13
+StatusLabel.Font = Enum.Font.SourceSans
+StatusLabel.Parent = MainFrame
+
+-- Tombol Start/Stop TP
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(1, -20, 0, 40)
+ToggleBtn.Position = UDim2.new(0, 10, 0, 195)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Text = "START AUTO TP"
+ToggleBtn.TextSize = 14
+ToggleBtn.Font = Enum.Font.SourceSansBold
+ToggleBtn.Parent = MainFrame
+
+-- Variabel Kontrol
+local isRunning = false
+
+-- Fungsi Eksekusi Teleport ke Index Tertentu
+local function teleportTo(index)
+    if index < 1 or index > #waypoints then return false end
+    
+    local pos = waypoints[index]
+    character = player.Character or player.CharacterAdded:Wait()
+    humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    
+    humanoidRootPart.CFrame = CFrame.new(pos)
+    CpInput.Text = tostring(index)
+    return true
+end
+
+-- Fungsi Utama Loop Teleport
+task.spawn(function()
+    while true do
+        if isRunning then
+            local startCp = tonumber(CpInput.Text) or 1
+            if startCp < 1 or startCp > #waypoints then startCp = 1 end
+            
+            local loopCount = 0
+            while isRunning do
+                loopCount = loopCount + 1
+                
+                for i = startCp, #waypoints do
+                    if not isRunning then break end
+                    
+                    -- Update CP input box
+                    CpInput.Text = tostring(i)
+                    local customDelay = tonumber(DelayInput.Text) or 10
+                    
+                    -- Lakukan Teleport
+                    if not teleportTo(i) then break end
+                    
+                    -- Countdown Delay
+                    local countdown = customDelay
+                    while countdown > 0 and isRunning do
+                        local currentDelayLimit = tonumber(DelayInput.Text) or 10
+                        if countdown > currentDelayLimit then
+                            countdown = currentDelayLimit
+                        end
+                        
+                        StatusLabel.Text = string.format("[Put. %d] TP %d/%d (Next: %ds)", loopCount, i, #waypoints, math.ceil(countdown))
+                        task.wait(1)
+                        countdown = countdown - 1
+                    end
+                end
+                
+                -- Reset startCp ke 1 untuk putaran berikutnya
+                startCp = 1
+                
+                -- Setelah selesai melewati semua waypoint, eksekusi Event
+                if isRunning then
+                    StatusLabel.Text = "[Put. " .. loopCount .. "] Firing Event..."
+                    local success, err = pcall(function()
+                        ReplicatedStorage:WaitForChild("CPEvents"):WaitForChild("ResetToBC"):FireServer()
+                    end)
+                    
+                    if not success then
+                        warn("Gagal FireServer: " .. tostring(err))
+                    end
+                    
+                    task.wait(2)
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+-- Tombol Prev
+PrevBtn.MouseButton1Click:Connect(function()
+    if isRunning then return end -- Jangan ubah manual saat running
+    local currentCp = tonumber(CpInput.Text) or 1
+    local targetCp = math.clamp(currentCp - 1, 1, #waypoints)
+    teleportTo(targetCp)
+    StatusLabel.Text = "Moved to CP: " .. targetCp
+end)
+
+-- Tombol Next
+NextBtn.MouseButton1Click:Connect(function()
+    if isRunning then return end
+    local currentCp = tonumber(CpInput.Text) or 1
+    local targetCp = math.clamp(currentCp + 1, 1, #waypoints)
+    teleportTo(targetCp)
+    StatusLabel.Text = "Moved to CP: " .. targetCp
+end)
+
+-- Event Tombol Toggle
+ToggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    if isRunning then
+        ToggleBtn.Text = "STOP AUTO TP"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+        PrevBtn.Active = false
+        NextBtn.Active = false
+    else
+        ToggleBtn.Text = "START AUTO TP"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+        PrevBtn.Active = true
+        NextBtn.Active = true
+        StatusLabel.Text = "Status: Dihentikan"
+    end
+end)
+
+-- Event Tombol Close
+CloseBtn.MouseButton1Click:Connect(function()
+    isRunning = false
+    ScreenGui:Destroy()
+end)
+
+-- Event Tombol Minimize
+local isMinimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    if isMinimized then
+        DelayLabel.Visible = false
+        DelayInput.Visible = false
+        CpLabel.Visible = false
+        CpInput.Visible = false
+        PrevBtn.Visible = false
+        NextBtn.Visible = false
+        ToggleBtn.Visible = false
+        StatusLabel.Visible = false
+        MainFrame.Size = UDim2.new(0, 260, 0, 30)
+        MinBtn.Text = "+"
+    else
+        DelayLabel.Visible = true
+        DelayInput.Visible = true
+        CpLabel.Visible = true
+        CpInput.Visible = true
+        PrevBtn.Visible = true
+        NextBtn.Visible = true
+        ToggleBtn.Visible = true
+        StatusLabel.Visible = true
+        MainFrame.Size = UDim2.new(0, 260, 0, 260)
+        MinBtn.Text = "-"
+    end
+end)
