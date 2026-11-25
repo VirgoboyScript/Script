@@ -14,7 +14,7 @@ end
 --// 「 Credits to Remote Detector 」
 local TARGET_PLACE_ID = 4655652068
 local MAX_REVEALS = 10
-local SCRIPT_URL = "https://raw.githubusercontent.com/Vircap02/Script/refs/heads/main/Gold%20Hunters"
+local SCRIPT_URL = "https://raw.githubusercontent.com/VirgoboyScript/Script/refs/heads/main/Gold%20Hunter"
 
 local AutoRunning = false
 local RunToken = 0
