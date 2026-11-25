@@ -1,0 +1,1060 @@
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local LocalPlayer = Players.LocalPlayer
+
+local coreGui = cloneref(game:GetService("CoreGui"))
+local userInputService = cloneref(game:GetService("UserInputService"))
+local runService = cloneref(game:GetService("RunService"))
+local tweenService = cloneref(game:GetService("TweenService"))
+
+if coreGui:FindFirstChild("AceSniperUI") then
+	coreGui.AceSniperUI:Destroy()
+end
+
+--// 「 Credits to Remote Detector 」
+local TARGET_PLACE_ID = 4655652068
+local MAX_REVEALS = 10
+local SCRIPT_URL = "https://raw.githubusercontent.com/Vircap02/Script/refs/heads/main/Gold%20Hunters"
+
+local AutoRunning = false
+local RunToken = 0
+local QueuedForTeleport = false
+
+local RecordedReveals = {}
+local SeenRevealKeys = {}
+
+-- Forward declaration agar bisa dipanggil di fungsi Auto Play
+local onStatusChange = function(statusText, stepText)
+	-- print(string.format("[%s] %s", stepText or "-", statusText))
+end
+
+local function makePosKey(cf)
+	local p = cf.Position
+	return string.format("%.0f_%.0f_%.0f", p.X, p.Y, p.Z)
+end
+
+local function resetRecordedReveals()
+	table.clear(RecordedReveals)
+	table.clear(SeenRevealKeys)
+end
+
+local function addUniqueReveals(rawBeams, maxLimit)
+	local limit = maxLimit or MAX_REVEALS
+	local addedCount = 0
+	for _, entry in ipairs(rawBeams) do
+		if #RecordedReveals >= limit then
+			break
+		end
+		local key = entry.key or makePosKey(entry.cframe)
+		if not SeenRevealKeys[key] then
+			SeenRevealKeys[key] = true
+			table.insert(RecordedReveals, {
+				instance = entry.instance,
+				cframe = entry.cframe,
+				key = key,
+			})
+			addedCount += 1
+		end
+	end
+	return addedCount
+end
+
+local function isActive(token)
+	return AutoRunning and (token == RunToken)
+end
+
+local function getRootPart()
+	local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+	return char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 10)
+end
+
+local function getPivotCFrame(obj)
+	if not obj or not obj.Parent then
+		return nil
+	end
+	if obj:IsA("BasePart") then
+		return obj.CFrame
+	elseif obj:IsA("Attachment") then
+		return obj.WorldCFrame
+	elseif obj:IsA("Model") then
+		local ok, cf = pcall(function()
+			return obj:GetPivot()
+		end)
+		if ok and typeof(cf) == "CFrame" then
+			return cf
+		end
+		if obj.PrimaryPart then
+			return obj.PrimaryPart.CFrame
+		end
+		local part = obj:FindFirstChildWhichIsA("BasePart", true)
+		if part then
+			return part.CFrame
+		end
+	else
+		local part = obj:FindFirstChildWhichIsA("BasePart", true)
+		if part then
+			return part.CFrame
+		end
+	end
+	return nil
+end
+
+local function teleportTo(cf)
+	if not cf then return end
+	local hrp = getRootPart()
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.CFrame = cf * CFrame.new(0, 3, 0)
+	end
+end
+
+local function firePrompt(prompt)
+	if not prompt or not prompt.Parent or not prompt:IsA("ProximityPrompt") then
+		return false
+	end
+	local okFire = false
+	if typeof(fireproximityprompt) == "function" then
+		okFire = pcall(function()
+			fireproximityprompt(prompt)
+		end)
+	end
+	if not okFire then
+		pcall(function()
+			prompt:InputHoldBegin()
+			task.wait(math.max(prompt.HoldDuration, 0.05))
+			prompt:InputHoldEnd()
+		end)
+	end
+	return true
+end
+
+local function findPromptIn(container, preferredName)
+	if not container then return nil end
+	if preferredName then
+		local direct = container:FindFirstChild(preferredName, true)
+		if direct and direct:IsA("ProximityPrompt") then
+			return direct
+		end
+	end
+	return container:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function getScanObjects()
+	local scanner = workspace:FindFirstChild("[WGC Integration] Scanner")
+	if not scanner then return nil, nil end
+	local att = scanner:FindFirstChild("Attachment")
+	local scanPrompt = findPromptIn(att, "@SCAN_PROMPT") or findPromptIn(scanner, "@SCAN_PROMPT")
+	return scanner, scanPrompt
+end
+
+local function getPortalObjects()
+	local portal
+	for _, child in ipairs(workspace:GetChildren()) do
+		if child.Name == "Portal" and child:FindFirstChild("Emitter") then
+			portal = child
+			break
+		end
+	end
+
+	if not portal then
+		portal = workspace:FindFirstChild("Portal")
+	end
+
+	if not portal then
+		return nil, nil
+	end
+
+	local emitter = portal:FindFirstChild("Emitter")
+	local portalPrompt = findPromptIn(emitter, "@PROMPT")
+		or findPromptIn(portal, "@PROMPT")
+		or findPromptIn(emitter)
+		or findPromptIn(portal)
+
+	return emitter or portal, portalPrompt
+end
+
+local function getSmelterObjects()
+	local interactable = workspace:FindFirstChild("Interactable")
+	local smelter = interactable and interactable:FindFirstChild("Smelter") or workspace:FindFirstChild("Smelter", true)
+	if not smelter then return nil, nil end
+	local att = smelter:FindFirstChild("Attachment")
+	local prompt = findPromptIn(att, "@PROMPT") or findPromptIn(smelter, "@PROMPT")
+	return smelter, prompt
+end
+
+local function deliverToSmelter()
+	onStatusChange("Delivering...", "Deliver")
+	local smelter, prompt = getSmelterObjects()
+	if not smelter and not prompt then
+		onStatusChange("Smelter not found", "Deliver")
+		return false
+	end
+	local targetCF = (prompt and (getPivotCFrame(prompt.Parent) or getPivotCFrame(prompt))) or getPivotCFrame(smelter)
+	if targetCF then
+		teleportTo(targetCF)
+		task.wait(0.2)
+	end
+	if prompt then
+		firePrompt(prompt)
+		onStatusChange("Delivered", "Deliver")
+		return true
+	else
+		onStatusChange("Smelt prompt not found", "Deliver")
+		return false
+	end
+end
+
+local function getWorkspaceByName(name)
+	local items = {}
+	for _, child in ipairs(workspace:GetChildren()) do
+		if child.Name == name then
+			table.insert(items, child)
+		end
+	end
+	return items
+end
+
+local function collectCurrentReveals()
+	local beams = getWorkspaceByName("Location Beam")
+	local list = {}
+	for _, beam in ipairs(beams) do
+		local cf = getPivotCFrame(beam)
+		if cf then
+			table.insert(list, {
+				instance = beam,
+				cframe = cf,
+				key = makePosKey(cf),
+			})
+		end
+	end
+	return list
+end
+
+local function getDigPrompt(digSpot)
+	if not digSpot or not digSpot.Parent then return nil end
+	local part = digSpot:FindFirstChild("Part")
+	if part then
+		local p = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if p and p.Enabled then return p end
+	end
+	for _, desc in ipairs(digSpot:GetDescendants()) do
+		if desc:IsA("ProximityPrompt") and desc.Enabled then
+			return desc
+		end
+	end
+	return nil
+end
+
+local function isSpotStillClaimable(digSpot, trackedPrompt)
+	if not digSpot or digSpot.Parent == nil then
+		return false
+	end
+	local currentPrompt = getDigPrompt(digSpot)
+	if trackedPrompt then
+		if trackedPrompt.Parent == nil or not trackedPrompt.Enabled then
+			if not currentPrompt then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+local function pickNextDigSpot(failedSpots)
+	local digSpots = getWorkspaceByName("Dig Spot")
+	for _, spot in ipairs(digSpots) do
+		if spot and spot.Parent ~= nil and not failedSpots[spot] then
+			return spot
+		end
+	end
+	return nil
+end
+
+-- Fokus 1 item saja: teleport 1x ke item, trigger prompt, lalu tunggu sampai item benar-benar terambil/hilang
+local function focusSingleDigSpot(token, targetDig, itemIndex, totalTarget)
+	if not targetDig or targetDig.Parent == nil then
+		return false
+	end
+
+	local digCF = getPivotCFrame(targetDig)
+	if not digCF then
+		return false
+	end
+
+	-- Teleport 1 kali saja ke posisi item yang sedang difokuskan
+	onStatusChange(string.format("Focus item %d/%d (TP 1x)...", itemIndex, totalTarget), "Dig")
+	teleportTo(digCF)
+	task.wait(0.25)
+
+	local activePrompt = getDigPrompt(targetDig)
+	if activePrompt and activePrompt.Parent and activePrompt.Enabled then
+		firePrompt(activePrompt)
+	end
+
+	local lastReFire = os.clock()
+	local startFocusClock = os.clock()
+
+	-- Tunggu sampai item terambil (hilang dari workspace atau prompt tidak lagi aktif)
+	while isActive(token) and isSpotStillClaimable(targetDig, activePrompt) do
+		onStatusChange(string.format("Waiting item %d/%d...", itemIndex, totalTarget), "Dig")
+
+		local latestPrompt = getDigPrompt(targetDig)
+		if latestPrompt and latestPrompt.Parent and latestPrompt.Enabled then
+			activePrompt = latestPrompt
+			if (os.clock() - lastReFire) >= 1.1 then
+				firePrompt(latestPrompt)
+				lastReFire = os.clock()
+			end
+		else
+			task.wait(0.25)
+			if not targetDig or targetDig.Parent == nil or not getDigPrompt(targetDig) then
+				break
+			end
+		end
+
+		if (os.clock() - startFocusClock) > 25 then
+			break
+		end
+
+		task.wait(0.15)
+	end
+
+	local claimed = (targetDig == nil or targetDig.Parent == nil)
+
+	-- Delay 5 detik sebelum teleport ke dig spot berikutnya
+	local delayStart = os.clock()
+	while isActive(token) and (os.clock() - delayStart) < 5 do
+		local rem = math.ceil(5 - (os.clock() - delayStart))
+		onStatusChange(string.format("Next dig in %ds...", rem), "Delay Dig")
+		task.wait(0.2)
+	end
+
+	return claimed
+end
+
+-- Proses 1 per 1 sampai maksimal MAX_REVEALS (10 item) per sesi
+local function processDigSpots(token)
+	local failedSpots = {}
+	local claimedOrProcessedCount = 0
+
+	while isActive(token) and claimedOrProcessedCount < MAX_REVEALS do
+		local targetDig = pickNextDigSpot(failedSpots)
+		if not targetDig then
+			break
+		end
+
+		local nextNumber = claimedOrProcessedCount + 1
+		local beforeClock = os.clock()
+		focusSingleDigSpot(token, targetDig, nextNumber, MAX_REVEALS)
+
+		claimedOrProcessedCount += 1
+
+		if targetDig and targetDig.Parent ~= nil and (os.clock() - beforeClock) > 29 then
+			failedSpots[targetDig] = true
+		end
+	end
+end
+
+local function queueAutoExecOnTeleport()
+	if QueuedForTeleport then
+		return true
+	end
+
+	local qot = queue_on_teleport
+		or (queueonteleport)
+		or (syn and syn.queue_on_teleport)
+		or (fluxus and fluxus.queue_on_teleport)
+
+	if typeof(qot) ~= "function" then
+		warn("[Gold Hunters] queue_on_teleport tidak didukung di executor ini.")
+		return false
+	end
+
+	local payload = string.format([[
+		if not game:IsLoaded() then
+			game.Loaded:Wait()
+		end
+		local Players = game:GetService("Players")
+		local lp = Players.LocalPlayer or Players.PlayerAdded:Wait()
+		local char = lp.Character or lp.CharacterAdded:Wait()
+		if not char:FindFirstChild("HumanoidRootPart") then
+			char:WaitForChild("HumanoidRootPart")
+		end
+		task.wait(2)
+		local ok, src = pcall(function()
+			return game:HttpGet(%q)
+		end)
+		if ok and type(src) == "string" and #src > 0 then
+			local fn, loadErr = loadstring(src)
+			if fn then
+				fn()
+			else
+				warn("[Gold Hunters] Loadstring error:", loadErr)
+			end
+		else
+			warn("[Gold Hunters] HttpGet failed:", src)
+		end
+	]], SCRIPT_URL)
+
+	local ok, err = pcall(function()
+		qot(payload)
+	end)
+
+	if ok then
+		QueuedForTeleport = true
+		return true
+	else
+		warn("[Gold Hunters] Gagal mengantrekan queue_on_teleport:", err)
+		return false
+	end
+end
+
+local function teleportToTargetPlace()
+	onStatusChange("Teleporting to game...", "Teleport To Game")
+	queueAutoExecOnTeleport()
+
+	--// 「 Credits to Remote Detector 」
+	local ok, err = pcall(function()
+		TeleportService:Teleport(TARGET_PLACE_ID)
+	end)
+	if not ok then
+		QueuedForTeleport = false
+		onStatusChange("TP Error: " .. tostring(err), "Teleport To Game")
+		return
+	end
+
+	task.delay(6, function()
+		if game.PlaceId ~= TARGET_PLACE_ID then
+			QueuedForTeleport = false
+		end
+	end)
+end
+
+local function rejoinServer()
+	onStatusChange("Rejoining server...", "Rejoin")
+	queueAutoExecOnTeleport()
+
+	local placeId = game.PlaceId
+	local jobId = game.JobId
+
+	local ok, err = pcall(function()
+		if jobId and jobId ~= "" then
+			TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+		else
+			TeleportService:Teleport(placeId, LocalPlayer)
+		end
+	end)
+
+	if not ok then
+		QueuedForTeleport = false
+		onStatusChange("Rejoin Error: " .. tostring(err), "Rejoin")
+	end
+end
+
+local function runAutoPlayCycle(token)
+	resetRecordedReveals()
+
+	onStatusChange("Scanning...", "Scan")
+	local _, scanPrompt = getScanObjects()
+	if not scanPrompt then
+		onStatusChange("Scan not found, delivering...", "Deliver")
+		deliverToSmelter()
+		task.wait(0.5)
+		if isActive(token) then
+			onStatusChange("Waiting 18s...", "Wait")
+			local waitStart = os.clock()
+			while isActive(token) do
+				local remaining = 18 - (os.clock() - waitStart)
+				if remaining <= 0 then break end
+				onStatusChange(string.format("Waiting %ds...", math.floor(remaining)), "Wait")
+				task.wait(0.5)
+			end
+			if isActive(token) then
+				teleportToTargetPlace()
+				task.wait(2)
+			end
+		end
+		return
+	end
+
+	local promptCF = getPivotCFrame(scanPrompt.Parent) or getPivotCFrame(scanPrompt)
+	if promptCF then
+		teleportTo(promptCF)
+		task.wait(0.2)
+	end
+	firePrompt(scanPrompt)
+
+	onStatusChange("Waiting...", "Reveal")
+	local revealWaitStart = os.clock()
+	repeat
+		if not isActive(token) then return end
+		local current = collectCurrentReveals()
+		if #current > 0 then
+			onStatusChange("Recording...", "Record")
+			addUniqueReveals(current, MAX_REVEALS)
+			if #RecordedReveals >= MAX_REVEALS then
+				break
+			end
+		end
+		task.wait(0.15)
+	until (os.clock() - revealWaitStart) > 8
+
+	if #RecordedReveals > 0 then
+		onStatusChange("Waiting...", "Hide Reveal")
+		local vanishStart = os.clock()
+		repeat
+			if not isActive(token) then return end
+			if #RecordedReveals < MAX_REVEALS then
+				local latest = collectCurrentReveals()
+				if #latest > 0 then
+					addUniqueReveals(latest, MAX_REVEALS)
+				end
+			end
+			local masihAda = 0
+			for _, item in ipairs(RecordedReveals) do
+				if item.instance and item.instance.Parent == workspace then
+					masihAda += 1
+				end
+			end
+			if masihAda == 0 then
+				break
+			end
+			task.wait(0.15)
+		until (os.clock() - vanishStart) > 12
+
+		local maxVisit = math.min(#RecordedReveals, MAX_REVEALS)
+		for idx = 1, maxVisit do
+			if not isActive(token) then return end
+			local item = RecordedReveals[idx]
+			onStatusChange(string.format("Teleporting (%d/%d)...", idx, maxVisit), "TP Reveal")
+			teleportTo(item.cframe)
+			task.wait(0.35)
+		end
+	end
+
+	onStatusChange("Waiting...", "Wait Dig")
+	local digWaitStart = os.clock()
+	repeat
+		if not isActive(token) then return end
+		if #getWorkspaceByName("Dig Spot") > 0 then
+			break
+		end
+		task.wait(0.2)
+	until (os.clock() - digWaitStart) > 6
+
+	while isActive(token) do
+		if #getWorkspaceByName("Dig Spot") > 0 then
+			processDigSpots(token)
+			if not isActive(token) then return end
+		end
+
+		local countdown = 5
+		local foundDigDuringCountdown = false
+
+		while isActive(token) and countdown > 0 do
+			if #getWorkspaceByName("Dig Spot") > 0 then
+				foundDigDuringCountdown = true
+				onStatusChange("Digging...", "Dig")
+				task.wait(0.2)
+				break
+			end
+			onStatusChange(string.format("Portal in %ds...", countdown), "Countdown")
+			local stepStart = os.clock()
+			while isActive(token) and (os.clock() - stepStart) < 1 do
+				if #getWorkspaceByName("Dig Spot") > 0 then
+					foundDigDuringCountdown = true
+					break
+				end
+				task.wait(0.1)
+			end
+			if foundDigDuringCountdown then
+				onStatusChange("Digging...", "Dig")
+				task.wait(0.15)
+				break
+			end
+			countdown -= 1
+		end
+
+		if not isActive(token) then return end
+		if not foundDigDuringCountdown and #getWorkspaceByName("Dig Spot") == 0 then
+			break
+		end
+	end
+
+	onStatusChange("Going to portal...", "Portal")
+	local portalObj, portalPrompt = getPortalObjects()
+	local portalCF = getPivotCFrame(portalObj) or (portalPrompt and (getPivotCFrame(portalPrompt.Parent) or getPivotCFrame(portalPrompt)))
+	if portalCF then
+		teleportTo(portalCF)
+		task.wait(0.25)
+	end
+	if portalPrompt then
+		firePrompt(portalPrompt)
+	end
+	task.wait(0.5)
+
+	if isActive(token) then
+		deliverToSmelter()
+		onStatusChange("Waiting 18s...", "Wait")
+		local waitStart = os.clock()
+		while isActive(token) do
+			local remaining = 18 - (os.clock() - waitStart)
+			if remaining <= 0 then break end
+			onStatusChange(string.format("Waiting %ds...", math.floor(remaining)), "Wait")
+			task.wait(0.5)
+		end
+		if isActive(token) then
+			teleportToTargetPlace()
+			task.wait(5)
+		end
+	end
+end
+
+local function setAutoPlay(enabled)
+	AutoRunning = enabled
+	RunToken += 1
+	local activeToken = RunToken
+
+	if not enabled then
+		onStatusChange("Idle", "-")
+		return
+	end
+
+	onStatusChange("Auto started", "Init")
+	task.spawn(function()
+		while isActive(activeToken) do
+			local ok, err = pcall(function()
+				runAutoPlayCycle(activeToken)
+			end)
+			if not ok then
+				onStatusChange("Error: " .. tostring(err), "Error")
+				task.wait(1)
+			end
+		end
+		if activeToken == RunToken and not AutoRunning then
+			onStatusChange("Idle", "-")
+		end
+	end)
+end
+
+--// ===================== CUSTOM GUI ===================== //--
+
+-- Warna Tema Halloween (Hitam Malam, Oranye Labu, Ungu Mistis)
+local COL_BG = Color3.fromRGB(15, 12, 22)
+local MIN_NORMAL = Color3.fromRGB(45, 25, 15)
+local MIN_HOVER = Color3.fromRGB(70, 35, 18)
+local CLOSE_NORMAL = Color3.fromRGB(45, 15, 15)
+local CLOSE_HOVER = Color3.fromRGB(80, 20, 20)
+
+local AUTO_OFF_NORMAL = Color3.fromRGB(32, 22, 45)
+local AUTO_OFF_HOVER = Color3.fromRGB(48, 32, 68)
+local AUTO_ON_NORMAL = Color3.fromRGB(165, 72, 0)
+local AUTO_ON_HOVER = Color3.fromRGB(205, 92, 0)
+
+local REJOIN_NORMAL = Color3.fromRGB(45, 24, 68)
+local REJOIN_HOVER = Color3.fromRGB(72, 38, 108)
+
+local STROKE_CS = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 15, 60)),
+	ColorSequenceKeypoint.new(0.25, Color3.fromRGB(220, 100, 0)),
+	ColorSequenceKeypoint.new(0.4, Color3.fromRGB(255, 140, 0)),
+	ColorSequenceKeypoint.new(0.6, Color3.fromRGB(255, 140, 0)),
+	ColorSequenceKeypoint.new(0.75, Color3.fromRGB(220, 100, 0)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 15, 60)),
+})
+
+local allGrads = {}
+
+local function animStroke(parent, thick)
+	local s = Instance.new("UIStroke")
+	s.Thickness = thick or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Color = Color3.new(1, 1, 1)
+	s.Parent = parent
+
+	local g = Instance.new("UIGradient")
+	g.Color = STROKE_CS
+	g.Rotation = 45
+	g.Parent = s
+
+	table.insert(allGrads, g)
+	return s
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AceSniperUI"
+gui.ResetOnSpawn = false
+gui.Parent = coreGui
+
+local FULL_W, FULL_H = 290, 118
+local MINI_W, MINI_H = 42, 42
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, FULL_W, 0, FULL_H)
+main.Position = UDim2.new(0.5, -FULL_W // 2, 0.4, -FULL_H // 2)
+main.BackgroundColor3 = COL_BG
+main.BackgroundTransparency = 0.15
+main.BorderSizePixel = 0
+main.ClipsDescendants = true
+main.Active = true
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+animStroke(main, 1.5)
+
+-- Logo Gambar di sebelah kiri Judul Utama
+local logoImg = Instance.new("ImageLabel")
+logoImg.Size = UDim2.new(0, 24, 0, 24)
+logoImg.Position = UDim2.new(0, 10, 0, 9)
+logoImg.BackgroundTransparency = 1
+logoImg.Image = "rbxassetid://134667732794034"
+logoImg.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -96, 0, 16)
+title.Position = UDim2.new(0, 40, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = "GOLD HUNTERS"
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 11.5
+title.TextColor3 = Color3.fromRGB(255, 140, 0)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = main
+
+local tGrad = Instance.new("UIGradient")
+tGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 170, 50)),
+	ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 170, 50)),
+})
+tGrad.Parent = title
+
+local desc = Instance.new("TextLabel")
+desc.Size = UDim2.new(1, -96, 0, 10)
+desc.Position = UDim2.new(0, 40, 0, 22)
+desc.BackgroundTransparency = 1
+desc.Text = "Made By Virgoboy"
+desc.Font = Enum.Font.GothamMedium
+desc.TextSize = 8.5
+desc.TextColor3 = Color3.fromRGB(180, 130, 220)
+desc.TextXAlignment = Enum.TextXAlignment.Left
+desc.Parent = main
+
+-- Garis pemisah tipis di bawah header
+local divider = Instance.new("Frame")
+divider.Size = UDim2.new(1, -20, 0, 1)
+divider.Position = UDim2.new(0, 10, 0, 39)
+divider.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+divider.BackgroundTransparency = 0.75
+divider.BorderSizePixel = 0
+divider.Parent = main
+
+-- Tombol Auto Play di bawah judul (Auto ON saat execute)
+local autoPlayEnabled = true
+local autoBtn = Instance.new("TextButton")
+autoBtn.Size = UDim2.new(1, -20, 0, 22)
+autoBtn.Position = UDim2.new(0, 10, 0, 44)
+autoBtn.BackgroundColor3 = AUTO_ON_NORMAL
+autoBtn.Text = "AUTO PLAY : ON"
+autoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+autoBtn.Font = Enum.Font.GothamBlack
+autoBtn.TextSize = 10
+autoBtn.BorderSizePixel = 0
+autoBtn.AutoButtonColor = false
+autoBtn.Parent = main
+Instance.new("UICorner", autoBtn).CornerRadius = UDim.new(0, 6)
+animStroke(autoBtn, 1)
+
+local autoScale = Instance.new("UIScale")
+autoScale.Scale = 1
+autoScale.Parent = autoBtn
+
+-- Tombol Rejoin di bawah tombol Auto Play
+local rejoinBtn = Instance.new("TextButton")
+rejoinBtn.Size = UDim2.new(1, -20, 0, 22)
+rejoinBtn.Position = UDim2.new(0, 10, 0, 70)
+rejoinBtn.BackgroundColor3 = REJOIN_NORMAL
+rejoinBtn.Text = "REJOIN SERVER"
+rejoinBtn.TextColor3 = Color3.fromRGB(245, 220, 255)
+rejoinBtn.Font = Enum.Font.GothamBlack
+rejoinBtn.TextSize = 9.5
+rejoinBtn.BorderSizePixel = 0
+rejoinBtn.AutoButtonColor = false
+rejoinBtn.Parent = main
+Instance.new("UICorner", rejoinBtn).CornerRadius = UDim.new(0, 6)
+animStroke(rejoinBtn, 1)
+
+local rejoinScale = Instance.new("UIScale")
+rejoinScale.Scale = 1
+rejoinScale.Parent = rejoinBtn
+
+-- Label Status kecil di bawah tombol Rejoin
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -20, 0, 14)
+statusLabel.Position = UDim2.new(0, 10, 0, 97)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Status: Auto started (Init)"
+statusLabel.Font = Enum.Font.GothamMedium
+statusLabel.TextSize = 8.5
+statusLabel.TextColor3 = Color3.fromRGB(190, 175, 215)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+statusLabel.Parent = main
+
+local function refreshAutoBtnVisual(isHover)
+	if autoPlayEnabled then
+		autoBtn.BackgroundColor3 = isHover and AUTO_ON_HOVER or AUTO_ON_NORMAL
+		autoBtn.Text = "AUTO PLAY : ON"
+		autoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	else
+		autoBtn.BackgroundColor3 = isHover and AUTO_OFF_HOVER or AUTO_OFF_NORMAL
+		autoBtn.Text = "AUTO PLAY : OFF"
+		autoBtn.TextColor3 = Color3.fromRGB(220, 195, 255)
+	end
+end
+
+onStatusChange = function(statusText, stepText)
+	statusLabel.Text = string.format("Status: %s (%s)", tostring(statusText or "-"), tostring(stepText or "-"))
+end
+
+local isAutoHovered = false
+autoBtn.MouseEnter:Connect(function()
+	isAutoHovered = true
+	tweenService:Create(autoBtn, TweenInfo.new(0.15), {
+		BackgroundColor3 = autoPlayEnabled and AUTO_ON_HOVER or AUTO_OFF_HOVER
+	}):Play()
+end)
+
+autoBtn.MouseLeave:Connect(function()
+	isAutoHovered = false
+	tweenService:Create(autoBtn, TweenInfo.new(0.15), {
+		BackgroundColor3 = autoPlayEnabled and AUTO_ON_NORMAL or AUTO_OFF_NORMAL
+	}):Play()
+end)
+
+autoBtn.MouseButton1Down:Connect(function()
+	tweenService:Create(autoScale, TweenInfo.new(0.07, Enum.EasingStyle.Linear), {Scale = 0.96}):Play()
+end)
+
+autoBtn.MouseButton1Up:Connect(function()
+	tweenService:Create(autoScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+end)
+
+autoBtn.MouseButton1Click:Connect(function()
+	autoPlayEnabled = not autoPlayEnabled
+	refreshAutoBtnVisual(isAutoHovered)
+	setAutoPlay(autoPlayEnabled)
+end)
+
+-- Interaksi Tombol Rejoin
+rejoinBtn.MouseEnter:Connect(function()
+	tweenService:Create(rejoinBtn, TweenInfo.new(0.15), {BackgroundColor3 = REJOIN_HOVER}):Play()
+end)
+
+rejoinBtn.MouseLeave:Connect(function()
+	tweenService:Create(rejoinBtn, TweenInfo.new(0.15), {BackgroundColor3 = REJOIN_NORMAL}):Play()
+end)
+
+rejoinBtn.MouseButton1Down:Connect(function()
+	tweenService:Create(rejoinScale, TweenInfo.new(0.07, Enum.EasingStyle.Linear), {Scale = 0.96}):Play()
+end)
+
+rejoinBtn.MouseButton1Up:Connect(function()
+	tweenService:Create(rejoinScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+end)
+
+rejoinBtn.MouseButton1Click:Connect(function()
+	rejoinServer()
+end)
+
+-- Tombol Close (X) di dalam panel utama (posisi paling kanan)
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 22, 0, 22)
+closeBtn.Position = UDim2.new(1, -30, 0, 8)
+closeBtn.BackgroundColor3 = CLOSE_NORMAL
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 120, 120)
+closeBtn.Font = Enum.Font.GothamBlack
+closeBtn.TextSize = 11
+closeBtn.BorderSizePixel = 0
+closeBtn.AutoButtonColor = false
+closeBtn.Parent = main
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
+animStroke(closeBtn, 1)
+
+local closeScale = Instance.new("UIScale")
+closeScale.Scale = 1
+closeScale.Parent = closeBtn
+
+-- Tombol Minimize (-) bergeser sedikit ke kiri agar ada ruang untuk tombol Close
+local minimized = false
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 22, 0, 22)
+minBtn.Position = UDim2.new(1, -56, 0, 8)
+minBtn.BackgroundColor3 = MIN_NORMAL
+minBtn.Text = "-"
+minBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+minBtn.Font = Enum.Font.GothamBlack
+minBtn.TextSize = 13
+minBtn.BorderSizePixel = 0
+minBtn.AutoButtonColor = false
+minBtn.Parent = main
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 5)
+animStroke(minBtn, 1)
+
+local minScale = Instance.new("UIScale")
+minScale.Scale = 1
+minScale.Parent = minBtn
+
+-- Pop-up ikon kecil menggunakan gambar kustom saat minimize
+local floatingIcon = Instance.new("ImageButton")
+floatingIcon.Size = UDim2.new(0, MINI_W, 0, MINI_H)
+floatingIcon.Position = main.Position
+floatingIcon.BackgroundColor3 = COL_BG
+floatingIcon.BackgroundTransparency = 0.15
+floatingIcon.Image = "rbxassetid://134667732794034"
+floatingIcon.Visible = false
+floatingIcon.AutoButtonColor = false
+floatingIcon.BorderSizePixel = 0
+floatingIcon.Parent = gui
+
+Instance.new("UICorner", floatingIcon).CornerRadius = UDim.new(0, 10)
+animStroke(floatingIcon, 1.5)
+
+-- Interaksi Tombol Minimize
+minBtn.MouseEnter:Connect(function()
+	tweenService:Create(minBtn, TweenInfo.new(0.15), {BackgroundColor3 = MIN_HOVER}):Play()
+end)
+
+minBtn.MouseLeave:Connect(function()
+	tweenService:Create(minBtn, TweenInfo.new(0.15), {BackgroundColor3 = MIN_NORMAL}):Play()
+end)
+
+minBtn.MouseButton1Down:Connect(function()
+	tweenService:Create(minBtn, TweenInfo.new(0.05), {BackgroundColor3 = Color3.fromRGB(20, 10, 5)}):Play()
+	tweenService:Create(minScale, TweenInfo.new(0.07, Enum.EasingStyle.Linear), {Scale = 0.93}):Play()
+	task.delay(0.07, function()
+		tweenService:Create(minBtn, TweenInfo.new(0.18), {BackgroundColor3 = MIN_NORMAL}):Play()
+		tweenService:Create(minScale, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+	end)
+end)
+
+-- Interaksi Tombol Close
+closeBtn.MouseEnter:Connect(function()
+	tweenService:Create(closeBtn, TweenInfo.new(0.15), {BackgroundColor3 = CLOSE_HOVER}):Play()
+end)
+
+closeBtn.MouseLeave:Connect(function()
+	tweenService:Create(closeBtn, TweenInfo.new(0.15), {BackgroundColor3 = CLOSE_NORMAL}):Play()
+end)
+
+closeBtn.MouseButton1Down:Connect(function()
+	tweenService:Create(closeBtn, TweenInfo.new(0.05), {BackgroundColor3 = Color3.fromRGB(30, 5, 5)}):Play()
+	tweenService:Create(closeScale, TweenInfo.new(0.07, Enum.EasingStyle.Linear), {Scale = 0.93}):Play()
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	autoPlayEnabled = false
+	setAutoPlay(false)
+
+	local tweenClose = tweenService:Create(main, TweenInfo.new(0.2, Enum.EasingStyle.Quint), {
+		Size = UDim2.new(0, 0, 0, 0),
+		BackgroundTransparency = 1
+	})
+	tweenClose:Play()
+	tweenClose.Completed:Connect(function()
+		gui:Destroy()
+	end)
+end)
+
+-- Fungsi Toggle Minimize / Restore
+minBtn.MouseButton1Click:Connect(function()
+	minimized = true
+
+	floatingIcon.Position = main.Position
+
+	local tweenOut = tweenService:Create(main, TweenInfo.new(0.2, Enum.EasingStyle.Quint), {
+		Size = UDim2.new(0, MINI_W, 0, MINI_H),
+		BackgroundTransparency = 1
+	})
+
+	tweenOut:Play()
+	tweenOut.Completed:Connect(function()
+		if minimized then
+			main.Visible = false
+			floatingIcon.Visible = true
+		end
+	end)
+end)
+
+floatingIcon.MouseButton1Click:Connect(function()
+	minimized = false
+
+	main.Position = floatingIcon.Position
+	main.Visible = true
+	floatingIcon.Visible = false
+
+	main.Size = UDim2.new(0, MINI_W, 0, MINI_H)
+	main.BackgroundTransparency = 1
+
+	local tweenIn = tweenService:Create(main, TweenInfo.new(0.3, Enum.EasingStyle.Quint), {
+		Size = UDim2.new(0, FULL_W, 0, FULL_H),
+		BackgroundTransparency = 0.15
+	})
+	tweenIn:Play()
+end)
+
+-- Sistem Dragging untuk Panel Utama & Pop-up Ikon Kecil
+do
+	local dragging, dragStart, startPos = false, nil, nil
+
+	local function applyDrag(obj)
+		obj.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				local abs = obj.AbsolutePosition
+				obj.Position = UDim2.new(0, abs.X, 0, abs.Y)
+				dragging = true
+				dragStart = i.Position
+				startPos = obj.Position
+			end
+		end)
+	end
+
+	applyDrag(main)
+	applyDrag(floatingIcon)
+
+	userInputService.InputChanged:Connect(function(i)
+		if not dragging then return end
+		if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+			local d = i.Position - dragStart
+			local vp = workspace.CurrentCamera.ViewportSize
+			local targetObj = minimized and floatingIcon or main
+			local gs = targetObj.AbsoluteSize
+
+			targetObj.Position = UDim2.new(
+				0,
+				math.clamp(startPos.X.Offset + d.X, 0, vp.X - gs.X),
+				0,
+				math.clamp(startPos.Y.Offset + d.Y, 0, vp.Y - gs.Y)
+			)
+		end
+	end)
+
+	userInputService.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+end
+
+runService.RenderStepped:Connect(function()
+	local off = Vector2.new(math.sin(tick() * 2.8), 0)
+	for _, g in ipairs(allGrads) do
+		g.Offset = off
+	end
+end)
+
+-- Jalankan Auto Play otomatis saat script di-execute
+refreshAutoBtnVisual(false)
+setAutoPlay(true)
